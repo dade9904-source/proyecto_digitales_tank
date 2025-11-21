@@ -1,0 +1,209 @@
+library ieee;
+use ieee.std_logic_1164.all;
+use work.game_pkg.all; 
+
+entity move_xy is
+  generic (
+    -- Límites del ÁREA DE JUEGO 
+    H_MIN      : integer := 144;  -- Límite izquierdo del área de juego
+    H_MAX_EXCL : integer := 784;  -- Límite derecho del área de juego
+    V_MIN      : integer := 35;   -- Límite superior del área de juego
+    V_MAX_EXCL : integer := 515;  -- Límite inferior del área de juego
+
+    HALF   : integer := 12;  -- semilado del sprite
+    STEP_X : integer := 3;   -- píxeles por frame en X
+    STEP_Y : integer := 3;   -- píxeles por frame en Y
+
+    X0 : integer := 144 + 320; -- posición inicial X
+    Y0 : integer := 35  + 240  -- posición inicial Y
+  );
+  port (
+    clk      : in  std_logic;  -- 25 MHz
+    sof_tick : in  std_logic;  -- pulso 1clk al inicio de cada frame
+
+    sw_up    : in  std_logic;
+    sw_down  : in  std_logic;
+    sw_left  : in  std_logic;
+    sw_right : in  std_logic;
+
+    -- PUERTOS ACTUALIZADOS 
+    reset_pos : in  std_logic;  -- '1' para forzar a (X0, Y0) (por bala o choque)
+
+    -- Puertos de colisión con otro tanque ELIMINADOS
+    
+    -- Información del mapa para colisión con paredes 
+    map_data     : in map_array_t;
+    map_offset_x : in integer range 0 to 2047; -- Pixel X donde empieza el mapa
+    map_offset_y : in integer range 0 to 1023; -- Pixel Y donde empieza el mapa
+    map_tile_dim : in integer range 1 to 64;   -- = SPRITE_DIM
+	 
+    --  FIN PUERTOS ACTUALIZADOS 
+
+    x_center : out integer range 0 to 2047;
+    y_center : out integer range 0 to 1023;
+
+    mv_up    : out std_logic;  -- indica movimiento real este frame
+    mv_down  : out std_logic;
+    mv_left  : out std_logic;
+    mv_right : out std_logic
+  );
+end entity;
+
+architecture rtl of move_xy is
+  signal x_reg : integer range 0 to 2047 := X0;
+  signal y_reg : integer range 0 to 1023 := Y0;
+
+  signal mv_up_r, mv_down_r, mv_left_r, mv_right_r : std_logic := '0';
+
+  function clamp(val, lo, hi : integer) return integer is
+    variable r : integer := val;
+  begin
+    if r < lo then r := lo; end if;
+    if r > hi then r := hi; end if;
+    return r;
+  end function;
+
+  -- Límites del *centro* del tanque (basado en los límites del área de juego)
+  constant X_MIN_CEN : integer := H_MIN + HALF;
+  constant X_MAX_CEN : integer := H_MAX_EXCL - 1 - HALF;
+  constant Y_MIN_CEN : integer := V_MIN + HALF;
+  constant Y_MAX_CEN : integer := V_MAX_EXCL - 1 - HALF;
+  
+begin
+  process(clk)
+    variable u, d, l, r  : boolean;
+    variable nx, ny      : integer;
+    variable nx_cl, ny_cl: integer;
+    variable dx, dy      : integer;
+    
+    variable temp_nx, temp_ny : integer;
+    variable my_nx_L, my_nx_R, my_ny_T, my_ny_B : integer;    -- Mi AABB propuesto
+    variable my_cur_L, my_cur_R, my_cur_T, my_cur_B : integer; -- Mi AABB actual (para el otro eje)
+    
+    -- Variables de colisión con tanque ELIMINADAS
+    
+    variable tile_L, tile_R, tile_T, tile_B : integer; -- AABB de una celda de pared
+    variable x_will_collide_wall, y_will_collide_wall : boolean;
+    
+  begin
+    if rising_edge(clk) then
+      if sof_tick = '1' then
+        
+        --  RESET (Prioridad máxima)
+        if reset_pos = '1' then
+          x_reg <= X0;
+          y_reg <= Y0;
+          mv_left_r  <= '0'; mv_right_r <= '0';
+          mv_up_r    <= '0'; mv_down_r  <= '0';
+
+        -- Logica de movimiento(si no hay reset)
+        else
+          u := (sw_up    = '1');
+          d := (sw_down  = '1');
+          l := (sw_left  = '1');
+          r := (sw_right = '1');
+
+          nx := x_reg; ny := y_reg; -- Empezar con la posición actual
+
+          --VALIDACIÓN EJE X 
+          temp_nx := x_reg; -- Posición X deseada
+          if    l and not r then temp_nx := x_reg - STEP_X;
+          elsif r and not l then temp_nx := x_reg + STEP_X;
+          end if;
+
+          my_cur_T := y_reg - HALF;
+          my_cur_B := y_reg + HALF - 1;
+          my_nx_L  := temp_nx - HALF;
+          my_nx_R  := temp_nx + HALF - 1;
+          
+          -- Colisión con PAREDES en X
+          x_will_collide_wall := false;
+          for row_idx in 0 to MAP_ROWS-1 loop
+            for col_idx in 0 to MAP_COLS-1 loop
+              if map_data(row_idx, col_idx) = '1' then
+                tile_L := map_offset_x + col_idx * map_tile_dim;
+                tile_R := tile_L + map_tile_dim - 1;
+                tile_T := map_offset_y + row_idx * map_tile_dim;
+                tile_B := tile_T + map_tile_dim - 1;
+                
+                if (my_nx_R >= tile_L) and (my_nx_L <= tile_R) and
+                   (my_cur_B >= tile_T) and (my_cur_T <= tile_B) then
+                  x_will_collide_wall := true;
+                  exit;
+                end if;
+              end if;
+            end loop;
+            if x_will_collide_wall then exit; end if;
+          end loop;
+
+          -- Aceptar movimiento X si no choca con pared
+          if not x_will_collide_wall then
+            nx := temp_nx;
+          end if;
+          
+
+          --  VALIDACIÓN EJE Y 
+          temp_ny := y_reg; -- Posición Y deseada
+          if    u and not d then temp_ny := y_reg - STEP_Y;
+          elsif d and not u then temp_ny := y_reg + STEP_Y;
+          end if;
+
+          my_cur_L := nx - HALF; -- Usar 'nx' (X ya validado)
+          my_cur_R := nx + HALF - 1;
+          my_ny_T  := temp_ny - HALF;
+          my_ny_B  := temp_ny + HALF - 1;
+          
+          -- Colisión con PAREDES en Y
+          y_will_collide_wall := false;
+          for row_idx in 0 to MAP_ROWS-1 loop
+            for col_idx in 0 to MAP_COLS-1 loop
+              if map_data(row_idx, col_idx) = '1' then
+                tile_L := map_offset_x + col_idx * map_tile_dim;
+                tile_R := tile_L + map_tile_dim - 1;
+                tile_T := map_offset_y + row_idx * map_tile_dim;
+                tile_B := tile_T + map_tile_dim - 1;
+                
+                if (my_cur_R >= tile_L) and (my_cur_L <= tile_R) and
+                   (my_ny_B >= tile_T) and (my_ny_T <= tile_B) then
+                  y_will_collide_wall := true;
+                  exit;
+                end if;
+              end if;
+            end loop;
+            if y_will_collide_wall then exit; end if;
+          end loop;
+          
+          -- Aceptar movimiento Y si no choca con pared
+          if not y_will_collide_wall then
+            ny := temp_ny;
+          end if;
+         
+
+          -- CLAMPING (Asegura que no se salga de los bordes del mapa)
+          nx_cl := clamp(nx, X_MIN_CEN, X_MAX_CEN);
+          ny_cl := clamp(ny, Y_MIN_CEN, Y_MAX_CEN);
+
+          --  Actualizar estado
+          dx := nx_cl - x_reg;
+          dy := ny_cl - y_reg;
+
+          x_reg <= nx_cl;
+          y_reg <= ny_cl;
+
+          if dx < 0 then mv_left_r  <= '1'; else mv_left_r  <= '0'; end if;
+          if dx > 0 then mv_right_r <= '1'; else mv_right_r <= '0'; end if;
+          if dy < 0 then mv_up_r    <= '1'; else mv_up_r    <= '0'; end if;
+          if dy > 0 then mv_down_r  <= '1'; else mv_down_r  <= '0'; end if;
+          
+        end if; 
+      end if;
+    end if;
+  end process;
+
+  x_center <= x_reg;
+  y_center <= y_reg;
+  mv_up    <= mv_up_r;
+  mv_down  <= mv_down_r;
+  mv_left  <= mv_left_r;
+  mv_right <= mv_right_r;
+end architecture;
