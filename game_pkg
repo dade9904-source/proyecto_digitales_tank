@@ -1,0 +1,18 @@
+library ieee;
+use ieee.std_logic_1164.all;
+
+package game_pkg is
+
+  -- Dimensiones del tanque
+  constant SPRITE_DIM : integer := 24; -- Debe ser 2 * S_HALF
+
+  -- Dimensiones del mapa en "celdas" de 24x24
+  -- 640 / 24 = 26.6 - 26 celdas
+  -- 480 / 24 = 20   - 20 celdas
+  constant MAP_COLS : integer := 26;
+  constant MAP_ROWS : integer := 20;
+
+  -- Tipo para la matriz del mapa 
+  type map_array_t is array (0 to MAP_ROWS-1, 0 to MAP_COLS-1) of std_logic;
+
+end package game_pkg;
