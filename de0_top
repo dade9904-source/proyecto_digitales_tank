@@ -1,0 +1,61 @@
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity de0_top is
+  port (
+    CLOCK_50    : in  std_logic;
+
+    -- Controles
+    SW          : in  std_logic_vector(7 downto 0);
+    KEY         : in  std_logic_vector(1 downto 0); -- KEY(0)=fire A (act 0), KEY(1)=fire B (act 0)
+    GPIO_C_U       : in  std_logic;
+    GPIO_C_D       : in  std_logic;
+    GPIO_C_L       : in  std_logic;
+    GPIO_C_R       : in  std_logic;
+    GPIO_C_FIRE_N  : in  std_logic;
+
+    -- VGA 
+    VGA_R       : out std_logic_vector(3 downto 0);
+    VGA_G       : out std_logic_vector(3 downto 0);
+    VGA_B       : out std_logic_vector(3 downto 0);
+    VGA_HS      : out std_logic;
+    VGA_VS      : out std_logic
+  );
+end entity;
+
+architecture rtl of de0_top is
+  
+  signal clk25   : std_logic := '0';
+
+  signal SWC     : std_logic_vector(3 downto 0);
+
+begin
+  -- Divisor 50 -> 25 MHz
+  process(CLOCK_50) begin
+    if rising_edge(CLOCK_50) then clk25 <= not clk25; end if;
+  end process;
+
+  -- Mapeo GPIO -> SWC
+  SWC(3) <= GPIO_C_U;  -- Up
+  SWC(2) <= GPIO_C_D;  -- Down
+  SWC(1) <= GPIO_C_L;  -- Left
+  SWC(0) <= GPIO_C_R;  -- Right
+
+  -- Núcleo VGA 3 jugadores
+  u_core: entity work.vga_two_tanks_core
+    port map(
+      clk_pix       => clk25,
+      SW            => SW,
+      SWC           => SWC,
+      btn_fire_a_n  => KEY(0),        -- activo en 0
+      btn_fire_b_n  => KEY(1),        -- activo en 0
+      btn_fire_c_n  => GPIO_C_FIRE_N, -- activo en 0
+
+      hsync         => VGA_HS,
+      vsync         => VGA_VS,
+      red           => VGA_R,
+      green         => VGA_G,
+      blue          => VGA_B
+    );
+end architecture;
