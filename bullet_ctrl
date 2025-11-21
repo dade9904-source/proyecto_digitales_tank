@@ -1,0 +1,143 @@
+library ieee;
+use ieee.std_logic_1164.all;
+use work.game_pkg.all; -- <-- Importante: Usar el nuevo paquete
+
+entity bullet_ctrl is
+  generic (
+    -- Límites del ÁREA DE JUEGO (no de la pantalla)
+    H_MIN      : integer := 144;
+    H_MAX_EXCL : integer := 784;
+    V_MIN      : integer := 35;
+    V_MAX_EXCL : integer := 515;
+
+    BUL_SZ : integer := 3;  -- lado de la bala (usar impar)
+    SPEED  : integer := 6   -- píxeles por frame
+  );
+  port (
+    clk      : in  std_logic;  -- 25 MHz
+    sof_tick : in  std_logic;  -- 1 pulso por frame
+
+    fire_n   : in  std_logic;  -- botón activo en 0
+    kill     : in  std_logic;  -- '1' = apagar bala (colisión con tanque)
+
+    spawn_x  : in  integer range 0 to 2047; -- punto donde nace (apex)
+    spawn_y  : in  integer range 0 to 1023;
+
+    dir_u    : in  std_logic;  -- dirección del disparo (one-hot)
+    dir_d    : in  std_logic;
+    dir_l    : in  std_logic;
+    dir_r    : in  std_logic;
+    
+ 
+    -- Información del mapa para colisión con paredes
+    map_data     : in map_array_t;
+    map_offset_x : in integer range 0 to 2047;
+    map_offset_y : in integer range 0 to 1023;
+    map_tile_dim : in integer range 1 to 64;
+
+
+    bul_x    : out integer range 0 to 2047; -- top-left
+    bul_y    : out integer range 0 to 1023;
+    bul_act  : out std_logic
+  );
+end entity;
+
+architecture rtl of bullet_ctrl is
+  signal x_reg, y_reg : integer range 0 to 2047 := 0;
+  signal act_reg      : std_logic := '0';
+  signal vx, vy       : integer range -16 to 16 := 0;
+  signal fire_prev_n  : std_logic := '1';
+
+  -- Límites para la esquina Top-Left de la bala
+  constant X_MIN_TL : integer := H_MIN;
+  constant X_MAX_TL : integer := H_MAX_EXCL - BUL_SZ;
+  constant Y_MIN_TL : integer := V_MIN;
+  constant Y_MAX_TL : integer := V_MAX_EXCL - BUL_SZ;
+
+  function clamp(val, lo, hi : integer) return integer is
+    variable r : integer := val;
+  begin
+    if r < lo then r := lo; end if;
+    if r > hi then r := hi; end if;
+    return r;
+  end function;
+begin
+  process(clk)
+    variable pressed : boolean;
+    variable sx, sy  : integer;
+    
+    variable tile_L, tile_R, tile_T, tile_B : integer;
+    variable intersects_wall : boolean;
+    variable bul_L, bul_R, bul_T, bul_B : integer;
+    
+  begin
+    if rising_edge(clk) then
+      if sof_tick = '1' then
+        pressed := (fire_prev_n = '1') and (fire_n = '0');
+        fire_prev_n <= fire_n;
+
+        --  Kill (por colisión con tanque)
+        if kill = '1' then
+          act_reg <= '0';
+        end if;
+
+        --  Spawn (si se presiona y no hay bala activa)
+        if (pressed and act_reg = '0' and kill = '0') then
+          sx := spawn_x - (BUL_SZ/2);
+          sy := spawn_y - (BUL_SZ/2);
+
+          x_reg   <= clamp(sx, X_MIN_TL, X_MAX_TL);
+          y_reg   <= clamp(sy, Y_MIN_TL, Y_MAX_TL);
+          act_reg <= '1';
+
+          if    dir_r = '1' then vx <=  SPEED; vy <=  0;
+          elsif dir_l = '1' then vx <= -SPEED; vy <=  0;
+          elsif dir_d = '1' then vx <=  0;     vy <=  SPEED;
+          else                   vx <=  0;     vy <= -SPEED; -- up
+          end if;
+
+        -- 3. Mover bala activa
+        elsif act_reg = '1' then
+          x_reg <= x_reg + vx;
+          y_reg <= y_reg + vy;
+
+          -- Colisión con PAREDES
+          intersects_wall := false;
+          bul_L := x_reg + vx; -- Calcular AABB en la *nueva* posición
+          bul_R := bul_L + BUL_SZ - 1;
+          bul_T := y_reg + vy;
+          bul_B := bul_T + BUL_SZ - 1;
+          
+          for row_idx in 0 to MAP_ROWS-1 loop
+            for col_idx in 0 to MAP_COLS-1 loop
+              if map_data(row_idx, col_idx) = '1' then
+                tile_L := map_offset_x + col_idx * map_tile_dim;
+                tile_R := tile_L + map_tile_dim - 1;
+                tile_T := map_offset_y + row_idx * map_tile_dim;
+                tile_B := tile_T + map_tile_dim - 1;
+
+                if (bul_R >= tile_L) and (bul_L <= tile_R) and
+                   (bul_B >= tile_T) and (bul_T <= tile_B) then
+                  intersects_wall := true;
+                  exit;
+                end if;
+              end if;
+            end loop;
+            if intersects_wall then exit; end if;
+          end loop;
+
+          -- Apagar por salir de pantalla O chocar con pared
+          if (x_reg < X_MIN_TL) or (x_reg > X_MAX_TL) or
+             (y_reg < Y_MIN_TL) or (y_reg > Y_MAX_TL) or
+             (intersects_wall = true) then
+            act_reg <= '0';
+          end if;
+        end if;
+      end if;
+    end if;
+  end process;
+
+  bul_x   <= x_reg;
+  bul_y   <= y_reg;
+  bul_act <= act_reg;
+end architecture;
