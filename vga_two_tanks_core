@@ -1,0 +1,858 @@
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use work.game_pkg.all;
+
+entity vga_two_tanks_core is
+  port (
+    clk_pix       : in  std_logic; -- 25 MHz
+    SW            : in  std_logic_vector(7 downto 0); 
+    SWC           : in  std_logic_vector(3 downto 0); 
+    btn_fire_a_n  : in  std_logic; -- activo en 0
+    btn_fire_b_n  : in  std_logic; -- activo en 0
+    btn_fire_c_n  : in  std_logic; -- activo en 0
+
+    hsync         : out std_logic;
+    vsync         : out std_logic;
+    red           : out std_logic_vector(3 downto 0);
+    green         : out std_logic_vector(3 downto 0);
+    blue          : out std_logic_vector(3 downto 0)
+  );
+end entity;
+
+architecture rtl of vga_two_tanks_core is
+  --  VGA 640x480@60
+  constant H_VISIBLE : integer := 640;
+  constant H_FRONT   : integer := 16;
+  constant H_SYNC    : integer := 96;
+  constant H_BACK    : integer := 48;
+  constant H_TOTAL   : integer := H_VISIBLE + H_FRONT + H_SYNC + H_BACK;
+
+  constant V_VISIBLE : integer := 480;
+  constant V_FRONT   : integer := 10;
+  constant V_SYNC    : integer := 2;
+  constant V_BACK    : integer := 33;
+  constant V_TOTAL   : integer := V_VISIBLE + V_FRONT + V_SYNC + V_BACK;
+
+  constant H_BEG : integer := H_SYNC + H_BACK;   -- 144
+  constant H_END : integer := H_BEG + H_VISIBLE; -- 784 (excl)
+  constant V_BEG : integer := V_SYNC + V_BACK;   -- 35
+  constant V_END : integer := V_BEG + V_VISIBLE; -- 515 (excl)
+
+  -- Geometría
+  constant S_HALF : integer := SPRITE_DIM / 2; -- 12
+
+  -- Balas
+  constant BUL_SZ : integer := 3;
+  constant BUL_V  : integer := 6;
+
+  -- Mapa centrado (26x20 de 24x24)
+  constant H_OFFSET_MAP : integer := (H_VISIBLE - (MAP_COLS * SPRITE_DIM)) / 2; -- 8
+  constant V_OFFSET_MAP : integer := (V_VISIBLE - (MAP_ROWS * SPRITE_DIM)) / 2; -- 0
+
+  constant GAME_H_MIN_ABS  : integer := H_BEG + H_OFFSET_MAP; -- 152
+  constant GAME_H_MAX_EXCL : integer := GAME_H_MIN_ABS + MAP_COLS * SPRITE_DIM; -- 776
+  constant GAME_V_MIN_ABS  : integer := V_BEG + V_OFFSET_MAP; -- 35
+  constant GAME_V_MAX_EXCL : integer := GAME_V_MIN_ABS + MAP_ROWS * SPRITE_DIM; -- 515
+
+  -- Spawns
+  constant X0_A : integer := GAME_H_MIN_ABS + SPRITE_DIM * 6;
+  constant Y0_A : integer := GAME_V_MIN_ABS + SPRITE_DIM * 10;
+  constant X0_B : integer := GAME_H_MIN_ABS + SPRITE_DIM * 20;
+  constant Y0_B : integer := GAME_V_MIN_ABS + SPRITE_DIM * 10;
+  constant X0_C : integer := GAME_H_MIN_ABS + SPRITE_DIM * 13;
+  constant Y0_C : integer := GAME_V_MIN_ABS + SPRITE_DIM * 10;  -- arriba, libre
+
+  -- Mapa (0=vacío, 1=pared)
+  constant GAME_MAP : map_array_t := (
+    ('1','1','1','1','1','1','1','1','1','1','1','1','1','1','1','1','1','1','1','1','1','1','1','1','1','1'),
+    ('1','0','0','0','0','0','0','0','0','0','0','0','0','1','0','0','0','0','0','0','0','0','0','0','0','1'),
+    ('1','0','1','1','0','1','1','1','0','1','1','1','0','1','0','1','1','1','0','1','1','1','0','1','1','1'),
+    ('1','0','1','1','0','1','1','1','0','1','1','1','0','1','0','1','1','1','0','1','1','1','0','1','1','1'),
+    ('1','0','0','0','0','0','0','0','0','0','0','0','0','0','0','0','0','0','0','0','0','0','0','0','0','1'),
+    ('1','0','1','1','0','1','0','1','1','1','0','1','1','1','1','1','0','1','1','1','0','1','0','1','1','1'),
+    ('1','0','1','1','0','1','0','1','1','1','0','1','1','1','1','1','0','1','1','1','0','1','0','1','1','1'),
+    ('1','0','0','0','0','1','0','0','0','0','0','0','0','1','0','0','0','0','0','0','0','1','0','0','0','1'),
+    ('1','1','1','1','0','1','1','1','0','1','1','1','0','1','0','1','1','1','0','1','1','1','0','1','1','1'),
+    ('1','0','0','0','0','0','0','0','0','1','0','0','0','0','0','0','0','1','0','0','0','0','0','0','0','1'),
+    ('1','0','0','0','0','0','0','0','0','1','0','0','0','0','0','0','0','1','0','0','0','0','0','0','0','1'),
+    ('1','1','1','1','0','1','1','1','0','1','1','1','0','1','0','1','1','1','0','1','1','1','0','1','1','1'),
+    ('1','0','0','0','0','1','0','0','0','0','0','0','0','1','0','0','0','0','0','0','0','1','0','0','0','1'),
+    ('1','0','1','1','0','1','0','1','1','1','0','1','1','1','1','1','0','1','1','1','0','1','0','1','1','1'),
+    ('1','0','1','1','0','1','0','1','1','1','0','1','1','1','1','1','0','1','1','1','0','1','0','1','1','1'),
+    ('1','0','0','0','0','0','0','0','0','0','0','0','0','0','0','0','0','0','0','0','0','0','0','0','0','1'),
+    ('1','0','1','1','0','1','1','1','0','1','1','1','0','1','0','1','1','1','0','1','1','1','0','1','1','1'),
+    ('1','0','1','1','0','1','1','1','0','1','1','1','0','1','0','1','1','1','0','1','1','1','0','1','1','1'),
+    ('1','0','0','0','0','0','0','0','0','0','0','0','0','1','0','0','0','0','0','0','0','0','0','0','0','1'),
+    ('1','1','1','1','1','1','1','1','1','1','1','1','1','1','1','1','1','1','1','1','1','1','1','1','1','1')
+  );
+
+ 
+  signal x_cnt, y_cnt : unsigned(9 downto 0) := (others=>'0');
+  signal hs_int, vs_int : std_logic := '1';
+  signal vs_prev, sof_tick : std_logic := '0';
+  signal vis : std_logic := '0';
+
+
+  constant NUMP : integer := 3;
+  type int_array is array (natural range <>) of integer;
+  type sl_array  is array (natural range <>) of std_logic;
+
+  -- Posiciones centro
+  signal xC : int_array(0 to NUMP-1) := (X0_A, X0_B, X0_C);
+  signal yC : int_array(0 to NUMP-1) := (Y0_A, Y0_B, Y0_C);
+
+  -- Movimiento del frame
+  signal mv_u, mv_d, mv_l, mv_r : sl_array(0 to NUMP-1) := (others=>'0');
+
+  -- Última dirección
+  signal last_u, last_d, last_l, last_r : sl_array(0 to NUMP-1) := (others=>'0');
+  signal last_init  : sl_array(0 to NUMP-1) := (others=>'0');
+  signal clear_last : sl_array(0 to NUMP-1) := (others=>'0'); -- para re-default
+
+  -- Apex
+  signal apex_x, apex_y : int_array(0 to NUMP-1) := (others=>0);
+
+  -- Balas
+  signal bul_x, bul_y : int_array(0 to NUMP-1) := (others=>0);
+  signal bul_act      : sl_array(0 to NUMP-1) := (others=>'0');
+  signal bul_kill     : sl_array(0 to NUMP-1) := (others=>'0');
+  signal sof_en       : sl_array(0 to NUMP-1) := (others=>'0'); -- tick para balas
+
+  -- Reset/vidas/config
+  signal reset_P : sl_array(0 to NUMP-1) := (others=>'0');
+  signal lives   : int_array(0 to NUMP-1) := (others=>3);
+  signal cfg_en  : sl_array(0 to NUMP-1) := ('1','1','0'); -- por defecto 2P (C apagado)
+  signal alive   : sl_array(0 to NUMP-1);
+
+  -- AABB
+  signal tL, tR, tT, tB : int_array(0 to NUMP-1);
+  signal bL, bR, bT, bB : int_array(0 to NUMP-1);
+
+  -- Colisiones latcheadas
+  signal tank_hit_by_bul : sl_array(0 to NUMP-1) := (others=>'0');
+  signal tanks_touch     : sl_array(0 to NUMP-1) := (others=>'0');
+
+  -- Cooldown golpe
+  constant HIT_CD_FR : integer := 8;
+  signal hit_cd : int_array(0 to NUMP-1) := (others=>0);
+
+  -- Estado de juego (con MENÚ)
+  type game_state_t is (STATE_MENU, STATE_READY, STATE_PLAY, STATE_GAME_OVER);
+  signal game_state : game_state_t := STATE_MENU;
+  signal ready_cnt  : integer range 0 to 120 := 0;
+  signal go_cnt     : integer range 0 to 360 := 0;
+  signal winner_idx : integer range 0 to NUMP-1 := 0;
+
+  -- Menú
+  signal menu_sel            : integer range 0 to 1 := 0; -- 0=2P, 1=3P
+  signal blink_cnt           : integer range 0 to 31 := 0;
+  signal lr_left_prev        : std_logic := '0';
+  signal lr_right_prev       : std_logic := '0';
+  signal btn_fire_a_prev_n   : std_logic := '1'; -- NUEVO: edge A
+  signal btn_fire_b_prev_n   : std_logic := '1'; -- NUEVO: edge B
+  signal btn_fire_c_prev_n   : std_logic := '1';
+
+  -- Colores (render)
+  signal r_sig, g_sig, b_sig : std_logic_vector(3 downto 0) := (others=>'0');
+
+  -- Controles gateados (solo PLAY y vivos)
+  signal play_en : sl_array(0 to NUMP-1);
+  signal ctrl_A_up, ctrl_A_down, ctrl_A_left, ctrl_A_right : std_logic;
+  signal ctrl_B_up, ctrl_B_down, ctrl_B_left, ctrl_B_right : std_logic;
+  signal ctrl_C_up, ctrl_C_down, ctrl_C_left, ctrl_C_right : std_logic;
+
+  -- Helpers
+  function u(i: integer) return unsigned is
+  begin return to_unsigned(i, 10); end;
+  function iabs(n: integer) return integer is
+    variable m: integer := n; begin if m<0 then m := -m; end if; return m; end;
+begin
+  --  Barrido y VS sync
+  process(clk_pix)
+  begin
+    if rising_edge(clk_pix) then
+      if x_cnt=u(H_TOTAL-1) then
+        x_cnt <= (others=>'0');
+        if y_cnt=u(V_TOTAL-1) then y_cnt <= (others=>'0'); else y_cnt <= y_cnt + 1; end if;
+      else
+        x_cnt <= x_cnt + 1;
+      end if;
+    end if;
+  end process;
+
+  hs_int <= '0' when (x_cnt < u(H_SYNC)) else '1';
+  vs_int <= '0' when (y_cnt < u(V_SYNC)) else '1';
+  hsync  <= hs_int;
+  vsync  <= vs_int;
+
+  process(clk_pix)
+  begin
+    if rising_edge(clk_pix) then
+      if (vs_prev='1' and vs_int='0') then sof_tick <= '1'; else sof_tick <= '0'; end if;
+      vs_prev <= vs_int;
+    end if;
+  end process;
+
+  vis <= '1' when (x_cnt>=u(H_BEG) and x_cnt<u(H_END) and y_cnt>=u(V_BEG) and y_cnt<u(V_END)) else '0';
+
+  --  Vivos / Gating
+  alive(0) <= '1' when (lives(0) > 0) and (cfg_en(0)='1') else '0';
+  alive(1) <= '1' when (lives(1) > 0) and (cfg_en(1)='1') else '0';
+  alive(2) <= '1' when (lives(2) > 0) and (cfg_en(2)='1') else '0';
+
+  play_en(0) <= '1' when (game_state = STATE_PLAY) and (alive(0)='1') else '0';
+  play_en(1) <= '1' when (game_state = STATE_PLAY) and (alive(1)='1') else '0';
+  play_en(2) <= '1' when (game_state = STATE_PLAY) and (alive(2)='1') else '0';
+
+  -- Controles A/B/C (si no está en PLAY o no vivo, quedan en 0)
+  ctrl_A_up    <= SW(3)  when play_en(0)='1' else '0';
+  ctrl_A_down  <= SW(2)  when play_en(0)='1' else '0';
+  ctrl_A_left  <= SW(1)  when play_en(0)='1' else '0';
+  ctrl_A_right <= SW(0)  when play_en(0)='1' else '0';
+
+  ctrl_B_up    <= SW(7)  when play_en(1)='1' else '0';
+  ctrl_B_down  <= SW(6)  when play_en(1)='1' else '0';
+  ctrl_B_left  <= SW(5)  when play_en(1)='1' else '0';
+  ctrl_B_right <= SW(4)  when play_en(1)='1' else '0';
+
+  ctrl_C_up    <= SWC(3) when play_en(2)='1' else '0';
+  ctrl_C_down  <= SWC(2) when play_en(2)='1' else '0';
+  ctrl_C_left  <= SWC(1) when play_en(2)='1' else '0';
+  ctrl_C_right <= SWC(0) when play_en(2)='1' else '0';
+
+  -- Tick de balas solo en PLAY y si su dueño está vivo
+  sof_en(0) <= sof_tick when play_en(0)='1' else '0';
+  sof_en(1) <= sof_tick when play_en(1)='1' else '0';
+  sof_en(2) <= sof_tick when play_en(2)='1' else '0';
+
+  --  Movimiento (A, B, C)
+  
+  u_move_A: entity work.move_xy
+    generic map(H_MIN=>GAME_H_MIN_ABS, H_MAX_EXCL=>GAME_H_MAX_EXCL, V_MIN=>GAME_V_MIN_ABS, V_MAX_EXCL=>GAME_V_MAX_EXCL,
+                HALF=>S_HALF, STEP_X=>3, STEP_Y=>3, X0=>X0_A, Y0=>Y0_A)
+    port map(clk=>clk_pix, sof_tick=>sof_tick,
+             sw_up=>ctrl_A_up, sw_down=>ctrl_A_down, sw_left=>ctrl_A_left, sw_right=>ctrl_A_right,
+             reset_pos=>reset_P(0),
+             map_data=>GAME_MAP, map_offset_x=>GAME_H_MIN_ABS, map_offset_y=>GAME_V_MIN_ABS, map_tile_dim=>SPRITE_DIM,
+             x_center=>xC(0), y_center=>yC(0),
+             mv_up=>mv_u(0), mv_down=>mv_d(0), mv_left=>mv_l(0), mv_right=>mv_r(0));
+
+  u_move_B: entity work.move_xy
+    generic map(H_MIN=>GAME_H_MIN_ABS, H_MAX_EXCL=>GAME_H_MAX_EXCL, V_MIN=>GAME_V_MIN_ABS, V_MAX_EXCL=>GAME_V_MAX_EXCL,
+                HALF=>S_HALF, STEP_X=>3, STEP_Y=>3, X0=>X0_B, Y0=>Y0_B)
+    port map(clk=>clk_pix, sof_tick=>sof_tick,
+             sw_up=>ctrl_B_up, sw_down=>ctrl_B_down, sw_left=>ctrl_B_left, sw_right=>ctrl_B_right,
+             reset_pos=>reset_P(1),
+             map_data=>GAME_MAP, map_offset_x=>GAME_H_MIN_ABS, map_offset_y=>GAME_V_MIN_ABS, map_tile_dim=>SPRITE_DIM,
+             x_center=>xC(1), y_center=>yC(1),
+             mv_up=>mv_u(1), mv_down=>mv_d(1), mv_left=>mv_l(1), mv_right=>mv_r(1));
+
+  u_move_C: entity work.move_xy
+    generic map(H_MIN=>GAME_H_MIN_ABS, H_MAX_EXCL=>GAME_H_MAX_EXCL, V_MIN=>GAME_V_MIN_ABS, V_MAX_EXCL=>GAME_V_MAX_EXCL,
+                HALF=>S_HALF, STEP_X=>3, STEP_Y=>3, X0=>X0_C, Y0=>Y0_C)
+    port map(clk=>clk_pix, sof_tick=>sof_tick,
+             sw_up=>ctrl_C_up, sw_down=>ctrl_C_down, sw_left=>ctrl_C_left, sw_right=>ctrl_C_right,
+             reset_pos=>reset_P(2),
+             map_data=>GAME_MAP, map_offset_x=>GAME_H_MIN_ABS, map_offset_y=>GAME_V_MIN_ABS, map_tile_dim=>SPRITE_DIM,
+             x_center=>xC(2), y_center=>yC(2),
+             mv_up=>mv_u(2), mv_down=>mv_d(2), mv_left=>mv_l(2), mv_right=>mv_r(2));
+
+ 
+  --  Última dirección + Apex
+
+  process(clk_pix)
+  begin
+    if rising_edge(clk_pix) then
+      if sof_tick='1' then
+        for p in 0 to NUMP-1 loop
+          if clear_last(p)='1' then last_init(p) <= '0'; end if;
+        end loop;
+
+        -- A: default mirando derecha
+        if last_init(0)='0' then last_r(0)<='1'; last_u(0)<='0'; last_d(0)<='0'; last_l(0)<='0'; last_init(0)<='1'; end if;
+        if (mv_u(0)='1') or (mv_d(0)='1') or (mv_l(0)='1') or (mv_r(0)='1') then
+          last_u(0)<=mv_u(0); last_d(0)<=mv_d(0); last_l(0)<=mv_l(0); last_r(0)<=mv_r(0);
+        end if;
+        if    last_u(0)='1' then apex_x(0)<=xC(0);              apex_y(0)<=yC(0)-S_HALF+1;
+        elsif last_d(0)='1' then apex_x(0)<=xC(0);              apex_y(0)<=yC(0)+S_HALF-1;
+        elsif last_l(0)='1' then apex_x(0)<=xC(0)-S_HALF+1;     apex_y(0)<=yC(0);
+        else                    apex_x(0)<=xC(0)+S_HALF-1;       apex_y(0)<=yC(0); end if;
+
+        -- B: default mirando izquierda
+        if last_init(1)='0' then last_l(1)<='1'; last_u(1)<='0'; last_d(1)<='0'; last_r(1)<='0'; last_init(1)<='1'; end if;
+        if (mv_u(1)='1') or (mv_d(1)='1') or (mv_l(1)='1') or (mv_r(1)='1') then
+          last_u(1)<=mv_u(1); last_d(1)<=mv_d(1); last_l(1)<=mv_l(1); last_r(1)<=mv_r(1);
+        end if;
+        if    last_u(1)='1' then apex_x(1)<=xC(1);              apex_y(1)<=yC(1)-S_HALF+1;
+        elsif last_d(1)='1' then apex_x(1)<=xC(1);              apex_y(1)<=yC(1)+S_HALF-1;
+        elsif last_l(1)='1' then apex_x(1)<=xC(1)-S_HALF+1;     apex_y(1)<=yC(1);
+        else                    apex_x(1)<=xC(1)+S_HALF-1;       apex_y(1)<=yC(1); end if;
+
+        -- C: default mirando abajo
+        if last_init(2)='0' then last_d(2)<='1'; last_u(2)<='0'; last_l(2)<='0'; last_r(2)<='0'; last_init(2)<='1'; end if;
+        if (mv_u(2)='1') or (mv_d(2)='1') or (mv_l(2)='1') or (mv_r(2)='1') then
+          last_u(2)<=mv_u(2); last_d(2)<=mv_d(2); last_l(2)<=mv_l(2); last_r(2)<=mv_r(2);
+        end if;
+        if    last_u(2)='1' then apex_x(2)<=xC(2);              apex_y(2)<=yC(2)-S_HALF+1;
+        elsif last_d(2)='1' then apex_x(2)<=xC(2);              apex_y(2)<=yC(2)+S_HALF-1;
+        elsif last_l(2)='1' then apex_x(2)<=xC(2)-S_HALF+1;     apex_y(2)<=yC(2);
+        else                    apex_x(2)<=xC(2)+S_HALF-1;       apex_y(2)<=yC(2); end if;
+      end if;
+    end if;
+  end process;
+
+ 
+  --  Balas
+ 
+  u_bullet_A: entity work.bullet_ctrl
+    generic map(H_MIN=>GAME_H_MIN_ABS, H_MAX_EXCL=>GAME_H_MAX_EXCL, V_MIN=>GAME_V_MIN_ABS, V_MAX_EXCL=>GAME_V_MAX_EXCL,
+                BUL_SZ=>BUL_SZ, SPEED=>BUL_V)
+    port map(clk=>clk_pix, sof_tick=>sof_en(0),
+             fire_n=>btn_fire_a_n, kill=>bul_kill(0),
+             spawn_x=>apex_x(0), spawn_y=>apex_y(0),
+             dir_u=>last_u(0), dir_d=>last_d(0), dir_l=>last_l(0), dir_r=>last_r(0),
+             map_data=>GAME_MAP, map_offset_x=>GAME_H_MIN_ABS, map_offset_y=>GAME_V_MIN_ABS, map_tile_dim=>SPRITE_DIM,
+             bul_x=>bul_x(0), bul_y=>bul_y(0), bul_act=>bul_act(0));
+
+  u_bullet_B: entity work.bullet_ctrl
+    generic map(H_MIN=>GAME_H_MIN_ABS, H_MAX_EXCL=>GAME_H_MAX_EXCL, V_MIN=>GAME_V_MIN_ABS, V_MAX_EXCL=>GAME_V_MAX_EXCL,
+                BUL_SZ=>BUL_SZ, SPEED=>BUL_V)
+    port map(clk=>clk_pix, sof_tick=>sof_en(1),
+             fire_n=>btn_fire_b_n, kill=>bul_kill(1),
+             spawn_x=>apex_x(1), spawn_y=>apex_y(1),
+             dir_u=>last_u(1), dir_d=>last_d(1), dir_l=>last_l(1), dir_r=>last_r(1),
+             map_data=>GAME_MAP, map_offset_x=>GAME_H_MIN_ABS, map_offset_y=>GAME_V_MIN_ABS, map_tile_dim=>SPRITE_DIM,
+             bul_x=>bul_x(1), bul_y=>bul_y(1), bul_act=>bul_act(1));
+
+  u_bullet_C: entity work.bullet_ctrl
+    generic map(H_MIN=>GAME_H_MIN_ABS, H_MAX_EXCL=>GAME_H_MAX_EXCL, V_MIN=>GAME_V_MIN_ABS, V_MAX_EXCL=>GAME_V_MAX_EXCL,
+                BUL_SZ=>BUL_SZ, SPEED=>BUL_V)
+    port map(clk=>clk_pix, sof_tick=>sof_en(2),
+             fire_n=>btn_fire_c_n, kill=>bul_kill(2),
+             spawn_x=>apex_x(2), spawn_y=>apex_y(2),
+             dir_u=>last_u(2), dir_d=>last_d(2), dir_l=>last_l(2), dir_r=>last_r(2),
+             map_data=>GAME_MAP, map_offset_x=>GAME_H_MIN_ABS, map_offset_y=>GAME_V_MIN_ABS, map_tile_dim=>SPRITE_DIM,
+             bul_x=>bul_x(2), bul_y=>bul_y(2), bul_act=>bul_act(2));
+
+  
+  --  AABB
+
+  gen_aabb: for i in 0 to NUMP-1 generate
+  begin
+    tL(i) <= xC(i) - S_HALF;       tR(i) <= xC(i) + S_HALF - 1;
+    tT(i) <= yC(i) - S_HALF;       tB(i) <= yC(i) + S_HALF - 1;
+
+    bL(i) <= bul_x(i);             bR(i) <= bul_x(i) + BUL_SZ - 1;
+    bT(i) <= bul_y(i);             bB(i) <= bul_y(i) + BUL_SZ - 1;
+  end generate;
+
+  --  FSM: MENÚ / READY / PLAY / GAME_OVER
+  process(clk_pix)
+    variable raw_hit_b : sl_array(0 to NUMP-1);
+    variable raw_touch : sl_array(0 to NUMP-1);
+    variable req_hit   : sl_array(0 to NUMP-1);
+    variable kill_b    : sl_array(0 to NUMP-1);
+    variable alive_cnt : integer;
+    variable last_alive: integer;
+
+    -- entradas menú
+    variable left_now  : std_logic;
+    variable right_now : std_logic;
+  begin
+    if rising_edge(clk_pix) then
+      if sof_tick='1' then
+        -- blink del menú
+        if blink_cnt = 31 then blink_cnt <= 0; else blink_cnt <= blink_cnt + 1; end if;
+
+        -- Edge-detect L/R (de A,B,C)
+        left_now  := SW(1) or SW(5) or SWC(1);
+        right_now := SW(0) or SW(4) or SWC(0);
+
+        case game_state is
+		  
+          -- MENÚ 
+          when STATE_MENU =>
+            -- Izquierda fija 2P, Derecha fija 3P
+            if (lr_left_prev='0' and left_now='1') then
+              menu_sel <= 0;
+            elsif (lr_right_prev='0' and right_now='1') then
+              menu_sel <= 1;
+            -- NUEVO: A o B (activos en bajo) alternan selección
+            elsif (btn_fire_a_prev_n='1' and btn_fire_a_n='0') or
+                  (btn_fire_b_prev_n='1' and btn_fire_b_n='0') then
+              if menu_sel=0 then menu_sel <= 1; else menu_sel <= 0; end if;
+            end if;
+
+            -- Confirmar con C (activo en bajo)
+            if (btn_fire_c_prev_n='1' and btn_fire_c_n='0') then
+              if menu_sel = 0 then
+                cfg_en <= ('1','1','0'); -- 2 jugadores
+              else
+                cfg_en <= ('1','1','1'); -- 3 jugadores
+              end if;
+              game_state <= STATE_READY;
+              ready_cnt  <= 0;
+            end if;
+
+            -- Actualiza memorias de flancos
+            lr_left_prev        <= left_now;
+            lr_right_prev       <= right_now;
+            btn_fire_a_prev_n   <= btn_fire_a_n; -- NUEVO
+            btn_fire_b_prev_n   <= btn_fire_b_n; -- NUEVO
+            btn_fire_c_prev_n   <= btn_fire_c_n;
+
+          -- --------------- READY ---------------
+          when STATE_READY =>
+            if ready_cnt = 0 then
+              for i in 0 to NUMP-1 loop
+                if cfg_en(i)='1' then lives(i) <= 3; else lives(i) <= 0; end if;
+                hit_cd(i)  <= 0;
+                reset_P(i) <= '1';
+                clear_last(i) <= '1';
+              end loop;
+              bul_kill <= (others => '1');
+              tank_hit_by_bul <= (others=>'0');
+              tanks_touch     <= (others=>'0');
+            else
+              for i in 0 to NUMP-1 loop
+                reset_P(i)   <= '0';
+                clear_last(i)<= '0';
+              end loop;
+              bul_kill <= (others => '1');
+            end if;
+
+            if ready_cnt < 30 then
+              ready_cnt <= ready_cnt + 1;
+            else
+              game_state <= STATE_PLAY;
+            end if;
+
+            lr_left_prev        <= left_now;
+            lr_right_prev       <= right_now;
+            btn_fire_a_prev_n   <= btn_fire_a_n;
+            btn_fire_b_prev_n   <= btn_fire_b_n;
+            btn_fire_c_prev_n   <= btn_fire_c_n;
+
+          -- --------------- PLAY ---------------
+          when STATE_PLAY =>
+            raw_hit_b := (others=>'0'); raw_touch := (others=>'0'); kill_b := (others=>'0');
+            req_hit   := (others=>'0');
+
+            --  colision balas -> tanques
+            for s in 0 to NUMP-1 loop
+              if bul_act(s)='1' and cfg_en(s)='1' then
+                for t in 0 to NUMP-1 loop
+                  if (t /= s) and (lives(t) > 0) and (cfg_en(t)='1') then
+                    if (tL(t) <= bR(s)) and (tR(t) >= bL(s)) and
+                       (tT(t) <= bB(s)) and (tB(t) >= bT(s)) then
+                      raw_hit_b(t) := '1';
+                      kill_b(s)    := '1';
+                    end if;
+                  end if;
+                end loop;
+              end if;
+            end loop;
+
+            -- colision tanque <-> tanque
+            for i in 0 to NUMP-1 loop
+              if (lives(i) > 0) and (cfg_en(i)='1') then
+                for j in i+1 to NUMP-1 loop
+                  if (lives(j) > 0) and (cfg_en(j)='1') then
+                    if (tL(i) <= tR(j)) and (tR(i) >= tL(j)) and
+                       (tT(i) <= tB(j)) and (tB(i) >= tT(j)) then
+                      raw_touch(i) := '1';
+                      raw_touch(j) := '1';
+                    end if;
+                  end if;
+                end loop;
+              end if;
+            end loop;
+
+            -- cooldown y aplicar 1 vida por evento
+				
+            for i in 0 to NUMP-1 loop
+              if hit_cd(i) > 0 then
+                hit_cd(i) <= hit_cd(i) - 1;
+              end if;
+              if ((raw_hit_b(i)='1') or (raw_touch(i)='1')) and (hit_cd(i)=0) and (lives(i) > 0) and (cfg_en(i)='1') then
+                req_hit(i) := '1';
+                hit_cd(i)  <= HIT_CD_FR;
+              end if;
+            end loop;
+
+            bul_kill <= kill_b;
+            for i in 0 to NUMP-1 loop
+              if req_hit(i)='1' then
+                if lives(i) > 0 then lives(i) <= lives(i) - 1; end if;
+                reset_P(i) <= '1';
+              else
+                reset_P(i) <= '0';
+              end if;
+            end loop;
+
+            tank_hit_by_bul <= raw_hit_b;
+            tanks_touch     <= raw_touch;
+
+            -- ganador
+				
+            alive_cnt := 0; last_alive := 0;
+            for i in 0 to NUMP-1 loop
+              if (lives(i) > 0) and (cfg_en(i)='1') then
+                alive_cnt := alive_cnt + 1;
+                last_alive := i;
+              end if;
+            end loop;
+            if alive_cnt <= 1 then
+              winner_idx <= last_alive;
+              game_state <= STATE_GAME_OVER;
+              go_cnt <= 0;
+              bul_kill <= (others => '1');
+              for i in 0 to NUMP-1 loop
+                reset_P(i) <= '0';
+              end loop;
+            end if;
+
+            lr_left_prev        <= left_now;
+            lr_right_prev       <= right_now;
+            btn_fire_a_prev_n   <= btn_fire_a_n;
+            btn_fire_b_prev_n   <= btn_fire_b_n;
+            btn_fire_c_prev_n   <= btn_fire_c_n;
+
+          --  GAME OVER 
+			 
+          when STATE_GAME_OVER =>
+            bul_kill <= (others => '1');
+            for i in 0 to NUMP-1 loop
+              reset_P(i)   <= '0';
+              clear_last(i)<= '0';
+            end loop;
+
+            if go_cnt < 120 then
+              go_cnt <= go_cnt + 1;
+            else
+              game_state <= STATE_MENU; -- regresa al menú
+            end if;
+
+            lr_left_prev        <= left_now;
+            lr_right_prev       <= right_now;
+            btn_fire_a_prev_n   <= btn_fire_a_n;
+            btn_fire_b_prev_n   <= btn_fire_b_n;
+            btn_fire_c_prev_n   <= btn_fire_c_n;
+        end case;
+      end if;
+    end if;
+  end process;
+
+  
+  --  Render 
+
+  process(clk_pix)
+    -- comunes
+    variable xi, yi : integer;
+
+    --  JUEGO
+    -- Mapa
+    variable in_map  : boolean;
+    variable is_brick, is_mortar : boolean;
+    variable map_col, map_row : integer;
+    variable cel_rel_x, cel_rel_y : integer;
+
+    -- Tanques
+    variable drawn_any : boolean;
+    variable rTx, rTy  : integer;
+    variable in_th, in_bh, in_tv, in_bv, in_tur : boolean;
+    variable in_cu, in_cd, in_cl, in_cr : boolean;
+    variable pixT : boolean;
+
+    -- Balas
+    variable pixBul : boolean;
+
+    -- Vidas
+    constant LIFE_SZ  : integer := 10;
+    constant LIFE_GAP : integer := 4;
+
+    constant LIFE_Y_A : integer := V_BEG + 10;
+    constant LIFE_X_A0: integer := H_BEG + 10;
+
+    constant LIFE_Y_B : integer := V_BEG + 10;
+    constant LIFE_X_B0: integer := H_END - 10 - (3*(LIFE_SZ+LIFE_GAP) - LIFE_GAP);
+
+    constant LIFE_Y_C : integer := V_BEG + 9; -- verde 1px más arriba
+    constant LIFE_X_C0: integer := (H_BEG + H_END)/2 - (3*(LIFE_SZ+LIFE_GAP) - LIFE_GAP)/2;
+
+    variable pixLifeA, pixLifeB, pixLifeC : boolean;
+
+    --  MENÚ 
+    constant CARD_W : integer := 240;
+    constant CARD_H : integer := 160;
+    constant BORDER_T : integer := 4;
+
+    variable cx_left, cx_right, cy_mid : integer;
+    variable in_card_L, in_card_R : boolean;
+    variable in_border_L, in_border_R : boolean;
+    variable relx, rely : integer;
+    variable selected_L, selected_R : boolean;
+
+    -- dígitos 
+    constant D_W : integer := 120;
+    constant D_H : integer := 80;
+    constant SEG_T : integer := 8;
+    constant HW : integer := D_W/2;
+    constant HH : integer := D_H/2;
+    constant VOFF : integer := D_H/4;
+
+    variable sa, sb, sc, sd, se, sf, sg : boolean;
+
+    -- iconos jugadores
+    constant PS : integer := 14;  -- tamaño cuadrado
+    constant PG : integer := 10;  -- separación
+    variable icon_y : integer;
+
+    --caja GAME OVER 
+    variable center_x, center_y : integer;
+    variable box_w, box_h : integer;
+    variable in_box : boolean;
+  begin
+    if rising_edge(clk_pix) then
+      xi := to_integer(x_cnt); yi := to_integer(y_cnt);
+
+      -- Fondo negro por defecto
+      r_sig <= (others=>'0'); g_sig <= (others=>'0'); b_sig <= (others=>'0');
+
+      if (xi>=H_BEG) and (xi<H_END) and (yi>=V_BEG) and (yi<V_END) then
+
+        if game_state = STATE_MENU then
+          --  Fondo del menú: gris oscuro 
+          r_sig <= x"1"; g_sig <= x"1"; b_sig <= x"1";
+
+          -- Centros de las tarjetas
+          cx_left  := H_BEG + H_VISIBLE/4;
+          cx_right := H_BEG + 3*H_VISIBLE/4;
+          cy_mid   := V_BEG + V_VISIBLE/2;
+
+   
+          in_card_L := (xi >= cx_left - CARD_W/2) and (xi < cx_left + CARD_W/2) and
+                       (yi >= cy_mid - CARD_H/2) and (yi < cy_mid + CARD_H/2);
+          in_card_R := (xi >= cx_right - CARD_W/2) and (xi < cx_right + CARD_W/2) and
+                       (yi >= cy_mid - CARD_H/2) and (yi < cy_mid + CARD_H/2);
+
+          -- Bordes
+          in_border_L := in_card_L and (
+             (xi < cx_left - CARD_W/2 + BORDER_T) or
+             (xi >= cx_left + CARD_W/2 - BORDER_T) or
+             (yi < cy_mid - CARD_H/2 + BORDER_T) or
+             (yi >= cy_mid + CARD_H/2 - BORDER_T)
+          );
+
+          in_border_R := in_card_R and (
+             (xi < cx_right - CARD_W/2 + BORDER_T) or
+             (xi >= cx_right + CARD_W/2 - BORDER_T) or
+             (yi < cy_mid - CARD_H/2 + BORDER_T) or
+             (yi >= cy_mid + CARD_H/2 - BORDER_T)
+          );
+
+          selected_L := (menu_sel = 0);
+          selected_R := (menu_sel = 1);
+
+          -- Pintar tarjetas: relleno y borde
+          if in_card_L then
+            if selected_L then r_sig<=x"4"; g_sig<=x"4"; b_sig<=x"4"; else r_sig<=x"2"; g_sig<=x"2"; b_sig<=x"2"; end if;
+          end if;
+          if in_border_L then
+            if selected_L then r_sig<=x"F"; g_sig<=x"F"; b_sig<=x"0"; else r_sig<=x"8"; g_sig<=x"8"; b_sig<=x"8"; end if;
+          end if;
+
+          if in_card_R then
+            if selected_R then r_sig<=x"4"; g_sig<=x"4"; b_sig<=x"4"; else r_sig<=x"2"; g_sig<=x"2"; b_sig<=x"2"; end if;
+          end if;
+          if in_border_R then
+            if selected_R then r_sig<=x"F"; g_sig<=x"F"; b_sig<=x"0"; else r_sig<=x"8"; g_sig<=x"8"; b_sig<=x"8"; end if;
+          end if;
+
+          -- Dígito "2" (izquierda)
+          relx := xi - cx_left; rely := yi - cy_mid;
+          sa := (iabs(rely + HH) <= SEG_T) and (iabs(relx) <= HW);
+          sg := (iabs(rely)      <= SEG_T) and (iabs(relx) <= HW);
+          sd := (iabs(rely - HH) <= SEG_T) and (iabs(relx) <= HW);
+          sf := (iabs(relx + HW) <= SEG_T) and (iabs(rely + VOFF) <= (VOFF - SEG_T));
+          sb := (iabs(relx - HW) <= SEG_T) and (iabs(rely + VOFF) <= (VOFF - SEG_T));
+          se := (iabs(relx + HW) <= SEG_T) and (iabs(rely - VOFF) <= (VOFF - SEG_T));
+          -- c apagado para el "2"
+          if in_card_L then
+            if sa or sb or sg or se or sd then
+              r_sig<=x"F"; g_sig<=x"F"; b_sig<=x"F";
+            end if;
+          end if;
+
+          -- Iconos 2P
+          icon_y := cy_mid + CARD_H/2 - 28;
+          if (xi >= cx_left - (PS + PG/2)) and (xi < cx_left - (PG/2)) and
+             (yi >= icon_y - PS/2) and (yi < icon_y + PS/2) then
+            r_sig<=x"F"; g_sig<=x"0"; b_sig<=x"0";
+          end if;
+          if (xi >= cx_left + (PG/2)) and (xi < cx_left + (PG/2) + PS) and
+             (yi >= icon_y - PS/2) and (yi < icon_y + PS/2) then
+            r_sig<=x"0"; g_sig<=x"0"; b_sig<=x"F";
+          end if;
+
+          -- Dígito "3" (derecha)
+          relx := xi - cx_right; rely := yi - cy_mid;
+          sa := (iabs(rely + HH) <= SEG_T) and (iabs(relx) <= HW);
+          sg := (iabs(rely)      <= SEG_T) and (iabs(relx) <= HW);
+          sd := (iabs(rely - HH) <= SEG_T) and (iabs(relx) <= HW);
+          sf := (iabs(relx + HW) <= SEG_T) and (iabs(rely + VOFF) <= (VOFF - SEG_T));
+          sb := (iabs(relx - HW) <= SEG_T) and (iabs(rely + VOFF) <= (VOFF - SEG_T));
+          -- e apagado en el "3"
+          sc := (iabs(relx - HW) <= SEG_T) and (iabs(rely - VOFF) <= (VOFF - SEG_T));
+          if in_card_R then
+            if sa or sb or sg or sc or sd then
+              r_sig<=x"F"; g_sig<=x"F"; b_sig<=x"F";
+            end if;
+          end if;
+
+          -- Iconos 3P
+          icon_y := cy_mid + CARD_H/2 - 28;
+          if (xi >= cx_right - (PS + PG) ) and (xi < cx_right - PG) and
+             (yi >= icon_y - PS/2) and (yi < icon_y + PS/2) then
+            r_sig<=x"F"; g_sig<=x"0"; b_sig<=x"0";
+          end if;
+          if (xi >= cx_right - (PS/2)) and (xi < cx_right + (PS/2)) and
+             (yi >= icon_y - PS/2) and (yi < icon_y + PS/2) then
+            r_sig<=x"0"; g_sig<=x"F"; b_sig<=x"0";
+          end if;
+          if (xi >= cx_right + PG) and (xi < cx_right + PG + PS) and
+             (yi >= icon_y - PS/2) and (yi < icon_y + PS/2) then
+            r_sig<=x"0"; g_sig<=x"0"; b_sig<=x"F";
+          end if;
+
+          -- Barra parpadeante sobre selección
+          if (blink_cnt < 16) then
+            if selected_L then
+              if (xi >= cx_left - 50) and (xi < cx_left + 50) and
+                 (yi >= cy_mid - CARD_H/2 - 20) and (yi < cy_mid - CARD_H/2 - 14) then
+                r_sig<=x"F"; g_sig<=x"F"; b_sig<=x"0";
+              end if;
+            else
+              if (xi >= cx_right - 50) and (xi < cx_right + 50) and
+                 (yi >= cy_mid - CARD_H/2 - 20) and (yi < cy_mid - CARD_H/2 - 14) then
+                r_sig<=x"F"; g_sig<=x"F"; b_sig<=x"0";
+              end if;
+            end if;
+          end if;
+
+        elsif game_state = STATE_GAME_OVER then
+          -- ===== Pantalla GO: cuadro del color del ganador =====
+          center_x := H_BEG + H_VISIBLE/2;
+          center_y := V_BEG + V_VISIBLE/2;
+          box_w := 220; box_h := 80;
+          in_box := (xi >= center_x - box_w/2) and (xi < center_x + box_w/2) and
+                    (yi >= center_y - box_h/2) and (yi < center_y + box_h/2);
+
+          if in_box then
+            if winner_idx=0 then r_sig<=x"F"; g_sig<=x"0"; b_sig<=x"0";
+            elsif winner_idx=1 then r_sig<=x"0"; g_sig<=x"0"; b_sig<=x"F";
+            else                   r_sig<=x"0"; g_sig<=x"F"; b_sig<=x"0"; end if;
+          else
+            r_sig <= x"0"; g_sig <= x"0"; b_sig <= x"0";
+          end if;
+
+        else
+          --  READY/PLAY: mapa, vidas, tanques, balas 
+          -- Mapa / bordes
+          is_brick := false;
+          in_map := (xi >= GAME_H_MIN_ABS) and (xi < GAME_H_MAX_EXCL) and (yi >= GAME_V_MIN_ABS) and (yi < GAME_V_MAX_EXCL);
+          if not in_map then
+            r_sig <= x"0"; g_sig <= x"A"; b_sig <= x"0"; -- borde verde
+          else
+            map_col := (xi - GAME_H_MIN_ABS) / SPRITE_DIM;
+            map_row := (yi - GAME_V_MIN_ABS) / SPRITE_DIM;
+            if GAME_MAP(map_row, map_col)='1' then
+              cel_rel_x := (xi - GAME_H_MIN_ABS) mod SPRITE_DIM;
+              cel_rel_y := (yi - GAME_V_MIN_ABS) mod SPRITE_DIM;
+              is_mortar := (cel_rel_y mod (SPRITE_DIM/3) = 0) or
+                           ((cel_rel_y < SPRITE_DIM*2/3) and (cel_rel_x mod (SPRITE_DIM/2) = 0)) or
+                           ((cel_rel_y >= SPRITE_DIM*2/3) and (cel_rel_x mod (SPRITE_DIM/3) = 0));
+              if is_mortar then r_sig<=x"7"; g_sig<=x"7"; b_sig<=x"7";
+              else              r_sig<=x"C"; g_sig<=x"4"; b_sig<=x"0";
+              end if;
+              is_brick := true;
+            end if;
+          end if;
+
+          -- Vidas
+          pixLifeA := false; pixLifeB := false; pixLifeC := false;
+
+          if lives(0)>=1 and (xi>=LIFE_X_A0) and (xi<LIFE_X_A0+LIFE_SZ) and (yi>=LIFE_Y_A) and (yi<LIFE_Y_A+LIFE_SZ) then pixLifeA := true; end if;
+          if lives(0)>=2 and (xi>=LIFE_X_A0+(LIFE_SZ+LIFE_GAP)) and (xi<LIFE_X_A0+2*LIFE_SZ+LIFE_GAP) and (yi>=LIFE_Y_A) and (yi<LIFE_Y_A+LIFE_SZ) then pixLifeA := true; end if;
+          if lives(0)>=3 and (xi>=LIFE_X_A0+2*(LIFE_SZ+LIFE_GAP)) and (xi<LIFE_X_A0+3*LIFE_SZ+2*LIFE_GAP) and (yi>=LIFE_Y_A) and (yi<LIFE_Y_A+LIFE_SZ) then pixLifeA := true; end if;
+          if pixLifeA then r_sig<=x"F"; g_sig<=x"0"; b_sig<=x"0"; end if;
+
+          if not pixLifeA then
+            if lives(1)>=1 and (xi>=LIFE_X_B0) and (xi<LIFE_X_B0+LIFE_SZ) and (yi>=LIFE_Y_B) and (yi<LIFE_Y_B+LIFE_SZ) then pixLifeB := true; end if;
+            if lives(1)>=2 and (xi>=LIFE_X_B0+(LIFE_SZ+LIFE_GAP)) and (xi<LIFE_X_B0+2*LIFE_SZ+LIFE_GAP) and (yi>=LIFE_Y_B) and (yi<LIFE_Y_B+LIFE_SZ) then pixLifeB := true; end if;
+            if lives(1)>=3 and (xi>=LIFE_X_B0+2*(LIFE_SZ+LIFE_GAP)) and (xi<LIFE_X_B0+3*LIFE_SZ+2*LIFE_GAP) and (yi>=LIFE_Y_B) and (yi<LIFE_Y_B+LIFE_SZ) then pixLifeB := true; end if;
+            if pixLifeB then r_sig<=x"0"; g_sig<=x"0"; b_sig<=x"F"; end if;
+          end if;
+
+          if not pixLifeA and not pixLifeB then
+            if lives(2)>=1 and (xi>=LIFE_X_C0) and (xi<LIFE_X_C0+LIFE_SZ) and (yi>=LIFE_Y_C) and (yi<LIFE_Y_C+LIFE_SZ) then pixLifeC := true; end if;
+            if lives(2)>=2 and (xi>=LIFE_X_C0+(LIFE_SZ+LIFE_GAP)) and (xi<LIFE_X_C0+2*LIFE_SZ+LIFE_GAP) and (yi>=LIFE_Y_C) and (yi<LIFE_Y_C+LIFE_SZ) then pixLifeC := true; end if;
+            if lives(2)>=3 and (xi>=LIFE_X_C0+2*(LIFE_SZ+LIFE_GAP)) and (xi<LIFE_X_C0+3*LIFE_SZ+2*LIFE_GAP) and (yi>=LIFE_Y_C) and (yi<LIFE_Y_C+LIFE_SZ) then pixLifeC := true; end if;
+            if pixLifeC then r_sig<=x"0"; g_sig<=x"F"; b_sig<=x"0"; end if;
+          end if;
+
+          -- Tanques (solo vivos)
+          drawn_any := false;
+          for p in 0 to NUMP-1 loop
+            if (lives(p) > 0) and (cfg_en(p)='1') and (not is_brick) and (not pixLifeA) and (not pixLifeB) and (not pixLifeC) and (not drawn_any) then
+              rTx := xi - xC(p); rTy := yi - yC(p);
+              in_th := (iabs(rTx) <= 10) and (iabs(rTy) >= 6 and iabs(rTy) <= 10);
+              in_bh := (iabs(rTx) <= 8)  and (iabs(rTy) <= 5);
+              in_tv := (iabs(rTy) <= 10) and (iabs(rTx) >= 6 and iabs(rTx) <= 10);
+              in_bv := (iabs(rTy) <= 8)  and (iabs(rTx) <= 5);
+              in_tur:= (iabs(rTx) <= 4)  and (iabs(rTy) <= 4);
+              in_cu := (iabs(rTx) <= 1) and (rTy >= -S_HALF+1 and rTy <= -5);
+              in_cd := (iabs(rTx) <= 1) and (rTy >= 5 and rTy <= S_HALF-1);
+              in_cl := (iabs(rTy) <= 1) and (rTx >= -S_HALF+1 and rTx <= -5);
+              in_cr := (iabs(rTy) <= 1) and (rTx >= 5 and rTx <= S_HALF-1);
+
+              if    last_u(p)='1' then pixT := in_tv or in_bv or in_tur or in_cu;
+              elsif last_d(p)='1' then pixT := in_tv or in_bv or in_tur or in_cd;
+              elsif last_l(p)='1' then pixT := in_th or in_bh or in_tur or in_cl;
+              else                    pixT := in_th or in_bh or in_tur or in_cr; end if;
+
+              if pixT then
+                if p=0 then r_sig<=x"F"; g_sig<=x"0"; b_sig<=x"0";
+                elsif p=1 then r_sig<=x"0"; g_sig<=x"0"; b_sig<=x"F";
+                else          r_sig<=x"0"; g_sig<=x"F"; b_sig<=x"0"; end if;
+                drawn_any := true;
+              end if;
+            end if;
+          end loop;
+
+          -- Balas
+          if not pixLifeA and not pixLifeB and not pixLifeC then
+            for s in 0 to NUMP-1 loop
+              if (bul_act(s)='1') and (cfg_en(s)='1') then
+                pixBul := (xi >= bul_x(s)) and (xi < bul_x(s)+BUL_SZ) and (yi >= bul_y(s)) and (yi < bul_y(s)+BUL_SZ);
+                if pixBul then
+                  if s=0 then r_sig<=x"F"; g_sig<=x"8"; b_sig<=x"8";
+                  elsif s=1 then r_sig<=x"F"; g_sig<=x"F"; b_sig<=x"0";
+                  else          r_sig<=x"0"; g_sig<=x"F"; b_sig<=x"0"; end if;
+                end if;
+              end if;
+            end loop;
+          end if;
+
+        end if; -- estado
+      end if; -- visible
+    end if; -- clk
+  end process;
+
+  -- Salidas RGB con gate
+  red   <= r_sig when vis='1' else (others=>'0');
+  green <= g_sig when vis='1' else (others=>'0');
+  blue  <= b_sig when vis='1' else (others=>'0');
+
+end architecture;
